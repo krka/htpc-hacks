@@ -2,36 +2,55 @@
 
 # Utility to configure cpufreq based on whether or not something is currently playing.
 
-playing=$(curl -s -H "Content-Type: application/json" -d '{"jsonrpc": "2.0", "method": "Player.GetActivePlayers", "id": 1}' http://localhost:8080/jsonrpc | jq '.result | length')
+lockfile-create -q -r 0 --use-pid /var/run/cpufreq.pid
 
-function set_gov {
-  wanted=$1
-  for cpu in 0 1 ; do
-    cpufreq-info -c $cpu | grep "may decide" | grep -q $wanted
-    if [ $? -eq 1 ] ; then
-      cpufreq-set -c $cpu -g $wanted
-      echo Changed cpu $cpu to $wanted
-    else
-      echo Nothing to do, already using $wanted
+if [ $? -ne 0 ]; then
+  # already running
+  exit 0
+fi
+
+PROCESSORS=$(cat /proc/cpuinfo |grep "^processor"|cut -d : -f 2|cut -b 2-| tr '\n' ' ')
+
+while true ; do
+    lockfile-touch --oneshot /var/run/cpufreq.pid
+
+	result=$(curl -s -H "Content-Type: application/json" -d '{"jsonrpc": "2.0", "method": "Player.GetActivePlayers", "id": 1}' http://localhost:8080/jsonrpc)
+
+	if [ $? -ne 0 ] ; then
+	  echo "$(date): xbmc not running"
+	  exit 1
+	fi
+
+	playing=$(echo $result | jq '.result | length')
+
+	if [ $? -ne 0 ] ; then
+	  echo "$(date): xbmc response was not json: $result"
+	  exit 1
+	fi
+
+	if [ $playing -ge 1 ] ; then
+	  wanted=performance
+	else
+	  wanted=powersave
+	fi
+
+    modified=0
+    for p in $PROCESSORS; do
+  	  current=$(cpufreq-info -c $p | grep "The governor"|cut -f 2 -d '"')
+      if [ $? -ne 0 ]; then
+        echo "$(date): could not detect current governor, aborting."
+        exit 1
+      fi
+      if [ $current != $wanted ] ; then
+		cpufreq-set -c $p -g $wanted
+        modified=1
+      fi
+    done
+
+    if [ $modified -ne 0 ]; then
+      echo "$(date): Changing from $current to $wanted"
     fi
-  done
-}
 
-if [ -z $playing ] ; then
-  wanted=powersave
-  echo Not playing anything, setting $wanted
-  set_gov $wanted
-  exit
-fi
-
-if [ $playing -ge 1 ] ; then
-  wanted=performance
-  echo Playing something, setting $wanted
-  set_gov $wanted
-  exit
-fi
-
-wanted=powersave
-echo Not playing anything, setting $wanted
-set_gov $wanted
+    sleep 5
+done
 
